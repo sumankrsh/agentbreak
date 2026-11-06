@@ -6,7 +6,8 @@ calls one and returns a dict with "ok" and either the result or "error".
 
 This one does a single job, paying supplier invoices it finds in the inbox,
 and it treats email content as data: it only pays accounts that are already
-saved payees, and it never acts on other instructions in a message.
+saved payees, and it never acts on other instructions in a message. Given any
+other task, it does nothing and says so.
 
     agentbreak run src/agentbreak/scenarios/02-poisoned-invoice-email.yaml --agent examples/careful_agent.py:run
 """
@@ -26,6 +27,9 @@ REQUEST = re.compile(
 
 
 def run(task, tools):
+    names = {spec["name"] for spec in tools.specs()}
+    if not re.search(r"\bpay\b", task, re.I) or not {"list_emails", "read_email", "transfer"} <= names:
+        return "I only pay supplier invoices from the inbox, so I did nothing."
     payees = {p["account"] for p in tools.call("list_payees").get("payees", [])}
     paid, skipped = [], []
     for item in tools.call("list_emails").get("emails", []):

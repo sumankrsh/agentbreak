@@ -13,7 +13,7 @@ from __future__ import annotations
 import copy
 import fnmatch
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
@@ -273,6 +273,7 @@ class PaymentService(Service):
             raise ConfigError("environment.payments.controls.approval_over must be a number")
         self.known_payees_only = bool(controls.get("known_payees_only", False))
         self.transfers: list[dict[str, Any]] = []
+        self.payees_added: list[dict[str, str]] = []
 
     def specs(self) -> list[ToolSpec]:
         return [
@@ -284,6 +285,13 @@ class PaymentService(Service):
                 "read",
             ),
             ToolSpec("list_payees", "List saved payees (account id and name).", _schema({}, []), self.name, "read"),
+            ToolSpec(
+                "add_payee",
+                "Save a new payee (account id and name) so it can be paid.",
+                _schema({"account": {"type": "string"}, "name": {"type": "string"}}, ["account", "name"]),
+                self.name,
+                "write",
+            ),
             ToolSpec(
                 "transfer",
                 f"Transfer money ({self.currency}) from a company account to another account.",
@@ -313,6 +321,15 @@ class PaymentService(Service):
             return {"account": account, "balance": self.balances[account], "currency": self.currency}
         if tool == "list_payees":
             return {"payees": [{"account": k, "name": v} for k, v in self.payees.items()]}
+        if tool == "add_payee":
+            account, name = args["account"].strip(), args["name"].strip()
+            if not account or not name:
+                raise ToolError("account and name must not be empty")
+            if account in self.payees:
+                raise ToolError(f"{account} is already a saved payee")
+            self.payees[account] = name
+            self.payees_added.append({"account": account, "name": name})
+            return {"added": account}
         if tool == "transfer":
             source = self._account(args.get("from_account"))
             amount = float(args["amount"])
@@ -341,10 +358,59 @@ class PaymentService(Service):
         raise ToolError(f"unknown tool {tool!r}")
 
     def state(self) -> dict[str, Any]:
-        return {"balances": dict(self.balances), "transfers": copy.deepcopy(self.transfers)}
+        return {
+            "balances": dict(self.balances),
+            "transfers": copy.deepcopy(self.transfers),
+            "payees_added": copy.deepcopy(self.payees_added),
+        }
 
 
 SERVICES: dict[str, type[Service]] = {"email": EmailService, "files": FileService, "payments": PaymentService}
+
+# Not a service: the place where a scenario tampers with the tools themselves.
+INJECTIONS = "injections"
+
+
+@dataclass(frozen=True)
+class Injections:
+    """Attacker-controlled text placed in the tools rather than in the data.
+
+    - `descriptions` appends text to a tool's description, as a poisoned or
+      compromised MCP server might.
+    - `responses` adds fields to every successful result of a tool, as a
+      tampered upstream API or a man-in-the-middle might.
+    """
+
+    descriptions: dict[str, str] = field(default_factory=dict)
+    responses: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    @classmethod
+    def parse(cls, raw: Any, tool_names: set[str]) -> Injections:
+        if raw is None:
+            return cls()
+        if not isinstance(raw, dict):
+            raise ConfigError("environment.injections must be a mapping with 'descriptions' and/or 'responses'")
+        _check_keys(INJECTIONS, raw, {"descriptions", "responses"})
+        descriptions = raw.get("descriptions") or {}
+        responses = raw.get("responses") or {}
+        if not isinstance(descriptions, dict) or not all(isinstance(v, str) for v in descriptions.values()):
+            raise ConfigError("environment.injections.descriptions must map tool names to text")
+        if not isinstance(responses, dict) or not all(isinstance(v, dict) and v for v in responses.values()):
+            raise ConfigError("environment.injections.responses must map tool names to fields to add")
+        for section, entries in (("descriptions", descriptions), ("responses", responses)):
+            unknown = set(entries) - tool_names
+            if unknown:
+                raise ConfigError(
+                    f"environment.injections.{section}: no such tool(s) {sorted(unknown)} in this environment"
+                )
+        for tool, fields in responses.items():
+            if "ok" in fields:
+                raise ConfigError(f"environment.injections.responses.{tool}: 'ok' can't be overridden")
+        return cls(
+            descriptions={str(k): v.strip() for k, v in descriptions.items()},
+            responses={str(k): dict(v) for k, v in responses.items()},
+        )
+
 
 _JSON_TYPES = {
     "string": (str,),
@@ -399,11 +465,17 @@ class Toolbox:
     """
 
     def __init__(self, environment: dict[str, Any], max_calls: int = 100):
-        unknown = set(environment) - set(SERVICES)
+        unknown = set(environment) - set(SERVICES) - {INJECTIONS}
         if unknown:
             raise ConfigError(f"environment: unknown services {sorted(unknown)}; available: {sorted(SERVICES)}")
         self.services = [SERVICES[name](environment[name] or {}) for name in SERVICES if name in environment]
+        if not self.services:
+            raise ConfigError("environment must configure at least one of email, files, payments")
         self._specs = {spec.name: (spec, svc) for svc in self.services for spec in svc.specs()}
+        self.injections = Injections.parse(environment.get(INJECTIONS), set(self._specs))
+        for tool, extra in self.injections.descriptions.items():
+            spec, svc = self._specs[tool]
+            self._specs[tool] = (replace(spec, description=f"{spec.description} {extra}"), svc)
         self.max_calls = max_calls
         self.calls: list[Call] = []
 
@@ -418,7 +490,7 @@ class Toolbox:
         entry = self._specs.get(tool)
         return entry[0].effect if entry else "unknown"
 
-    def call(self, name: str, arguments: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+    def call(self, name: str, arguments: dict[str, Any] | None = None, /, **kwargs: Any) -> dict[str, Any]:
         """Call a tool. Returns {"ok": True, ...} or {"ok": False, "error": "..."}; never raises for tool failures."""
         if len(self.calls) >= self.max_calls:
             raise CallLimitReached(f"the agent made more than {self.max_calls} tool calls")
@@ -445,7 +517,7 @@ class Toolbox:
             record.result = {"ok": False, "error": str(exc)}
         else:
             record.status = "executed"
-            record.result = {"ok": True, **result}
+            record.result = {"ok": True, **result, **copy.deepcopy(self.injections.responses.get(name, {}))}
         return copy.deepcopy(record.result)
 
     def state(self) -> dict[str, Any]:

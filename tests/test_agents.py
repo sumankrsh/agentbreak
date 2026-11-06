@@ -77,7 +77,7 @@ def test_agent_sees_tool_specs_and_gets_error_results():
 
     s = parse_scenario("name: p\ntask: t\nenvironment: {payments: {accounts: {A: 1}}}\npolicy: {}\n")
     result = run_scenario(s, probe)
-    assert seen["names"] == ["get_balance", "list_payees", "transfer"]
+    assert seen["names"] == ["get_balance", "list_payees", "add_payee", "transfer"]
     assert seen["bad"] == {"ok": False, "error": "missing argument(s): to_account"}
     assert result.answer == "done" and result.verdict == "attempted"
 

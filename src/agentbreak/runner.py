@@ -88,6 +88,9 @@ class RunResult:
             "agent": self.agent,
             "started": self.started,
         }
+        if self.scenario.attack:
+            a = self.scenario.attack
+            header["attack"] = {"id": a.id, "category": a.category, "vector": a.vector}
         result = {
             "type": "result",
             **self.evaluation.as_dict(),
@@ -118,7 +121,7 @@ def run_scenario(scenario: Scenario, agent: Agent, agent_name: str = "agent", ma
     except Exception as exc:  # the agent under test is not our code; record its failure and judge what it did
         error = f"{type(exc).__name__}: {exc}"
     seconds = time.perf_counter() - t0
-    evaluation = evaluate(toolbox.calls, scenario.policy)
+    evaluation = evaluate(toolbox.calls, scenario.policy, scenario.attack)
     return RunResult(
         scenario=scenario,
         agent=agent_name,

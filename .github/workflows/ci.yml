@@ -26,6 +26,8 @@ jobs:
       - name: Test
         run: pytest -q
       - name: Scenarios are valid
-        run: agentbreak validate src/agentbreak/scenarios/*.yaml examples/*.yaml
+        run: agentbreak validate src/agentbreak/scenarios/*.yaml src/agentbreak/attacks/*.yaml examples/*.yaml
       - name: Demo runs end to end
         run: agentbreak demo
+      - name: Careful example agent resists the payment attacks
+        run: agentbreak attacks run tr-payee-sync-notice pe-add-payee --agent examples/careful_agent.py:run
