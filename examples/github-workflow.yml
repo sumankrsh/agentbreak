@@ -1,0 +1,41 @@
+# Copy to .github/workflows/agentbreak.yml in the repository that holds your agent.
+# It runs `agentbreak ci` on every pull request, shows new violations as annotations
+# and in the job summary, uploads the HTML report, and sends the SARIF file to
+# GitHub code scanning (which needs the security-events permission).
+name: agentbreak
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  agentbreak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          pip install -e .                      # your agent's own dependencies
+          pip install git+https://github.com/sumankrsh/agentbreak
+      - name: Run agentbreak
+        run: agentbreak ci                      # reads ./agentbreak.yaml
+      - name: Upload the HTML and JSON reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentbreak-report
+          path: agentbreak-report/
+      - name: Send the SARIF report to code scanning
+        if: always() && hashFiles('agentbreak-report/report.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: agentbreak-report/report.sarif
+          category: agentbreak

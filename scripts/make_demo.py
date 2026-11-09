@@ -2,9 +2,10 @@
 
 Run from the project root:  python scripts/make_demo.py
 
-It runs `agentbreak attacks run` (the built-in vulnerable agent against the
-attack library) and saves what the terminal showed. That command exits 1 by
-design, because attacks succeed against the vulnerable agent.
+It copies agentbreak.yaml and examples/ into a temporary folder, runs
+`agentbreak ci` there (the example careful agent against an example scenario
+and the attack library) and saves what the terminal showed. That command exits
+1 by design: one attack gets past the careful agent.
 """
 
 from __future__ import annotations
@@ -28,8 +29,10 @@ def main() -> None:
     console = Console(record=True, width=96, file=io.StringIO(), force_terminal=True)
     cli.console = console
     workdir = Path(tempfile.mkdtemp())
+    shutil.copy(ROOT / "agentbreak.yaml", workdir / "agentbreak.yaml")
+    shutil.copytree(ROOT / "examples", workdir / "examples")
     os.chdir(workdir)
-    command = "agentbreak attacks run"
+    command = "agentbreak ci"
     console.print(f"[bold green]$[/bold green] [bold]{command}[/bold]")
     result = CliRunner().invoke(cli.app, shlex.split(command)[1:])
     os.chdir(ROOT)

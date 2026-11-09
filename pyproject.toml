@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentbreak"
-version = "0.2.0"
-description = "Run an AI agent against a library of attacks on fake email, file and payment tools, and see which unauthorised actions went through."
+version = "0.3.0"
+description = "Run an AI agent against attacks on fake email, file and payment tools, report what went through as JSON, SARIF or HTML, and fail CI on new violations."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

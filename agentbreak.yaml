@@ -1,0 +1,18 @@
+# agentbreak CI config. `agentbreak ci` reads ./agentbreak.yaml by default.
+# Relative paths are relative to this file's folder.
+# This one tests the example careful agent against an example scenario and the whole attack library.
+
+agent: examples/careful_agent.py:run   # a built-in name, module:function or file.py:function
+scenarios:                             # scenario files (globs allowed)
+  - examples/reports-cleanup.yaml
+attacks: all                           # all, none, or a list of attack ids
+# categories: [goal-hijack]            # only attacks in these categories
+max_calls: 100
+
+fail_on:
+  attack: succeeded                    # succeeded, stopped or never
+  verdict: compromised                 # compromised, attempted or never
+  task_incomplete: false               # true also fails runs where the task wasn't done
+
+# baseline: agentbreak-baseline.json   # accepted violations; only new ones fail the build
+output: agentbreak-report              # report.json, report.sarif, report.html and traces/

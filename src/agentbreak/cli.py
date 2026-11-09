@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -12,7 +13,21 @@ from rich.markup import escape
 from rich.table import Table
 
 from . import __version__
+from .ci import DEFAULT_CONFIG, github_annotations, load_config, markdown_summary
 from .evaluate import ATTEMPTED, CLEAN, COMPROMISED, RESISTED, STOPPED, SUCCEEDED
+from .report import (
+    OUTCOME_RULES,
+    VERDICT_RULES,
+    FailOn,
+    ReportError,
+    baseline_document,
+    build_report,
+    load_baseline,
+    run_record,
+    to_sarif,
+    write_html,
+    write_json,
+)
 from .runner import (
     BUILTIN_AGENTS,
     AgentLoadError,
@@ -207,6 +222,50 @@ def _load_all(paths: list[Path]) -> list[Scenario]:
     return scenarios
 
 
+JsonOption = Annotated[Path | None, typer.Option("--json", help="Write a JSON report to this file.")]
+SarifOption = Annotated[
+    Path | None, typer.Option("--sarif", help="Write a SARIF 2.1.0 report (for GitHub code scanning) to this file.")
+]
+HtmlOption = Annotated[Path | None, typer.Option("--html", help="Write a single-file HTML report to this file.")]
+BaselineOption = Annotated[
+    Path | None,
+    typer.Option("--baseline", help="Accept the violations listed in this baseline file; fail only on new ones."),
+]
+
+
+def _baseline(path: Path | None) -> dict[str, str]:
+    if path is None:
+        return {}
+    try:
+        return load_baseline(path)
+    except ReportError as exc:
+        err.print(f"[red]Baseline error:[/red] {escape(str(exc))}")
+        raise typer.Exit(2) from exc
+
+
+def _write_reports(report: dict, json_path: Path | None, sarif: Path | None, html: Path | None) -> list[Path]:
+    written = []
+    if json_path:
+        written.append(write_json(report, json_path))
+    if sarif:
+        written.append(write_json(to_sarif(report), sarif))
+    if html:
+        written.append(write_html(report, html))
+    for path in written:
+        console.print(f"[dim]Report: {escape(str(path))}[/dim]")
+    return written
+
+
+def _baseline_note(report: dict) -> None:
+    s = report["summary"]
+    if s["accepted_violations"]:
+        console.print(
+            f"[dim]{s['accepted_violations']} violation(s) accepted by the baseline; {s['new_violations']} new.[/dim]"
+        )
+    for gone in report["no_longer_seen"]:
+        console.print(f"[dim]In the baseline but no longer seen: {escape(gone)}[/dim]")
+
+
 def _run_all(
     scenarios: list[Scenario],
     agent_spec: str,
@@ -257,14 +316,22 @@ def run(
             help="Exit 1 when any scenario is 'compromised' (default), or also when 'attempted'. 'never' always exits 0.",
         ),
     ] = COMPROMISED,
+    json_report: JsonOption = None,
+    sarif: SarifOption = None,
+    html: HtmlOption = None,
+    baseline: BaselineOption = None,
 ) -> None:
     """Run an agent against one or more scenarios and judge every tool call it made."""
-    if fail_on not in {COMPROMISED, ATTEMPTED, "never"}:
+    if fail_on not in VERDICT_RULES:
         err.print("[red]--fail-on must be compromised, attempted or never[/red]")
         raise typer.Exit(2)
+    accepted = _baseline(baseline)
     results = _run_all(_load_all(scenarios), agent, None if no_traces else traces, max_calls)
-    failing = {COMPROMISED} if fail_on == COMPROMISED else {COMPROMISED, ATTEMPTED} if fail_on == ATTEMPTED else set()
-    if any(r.verdict in failing for r in results):
+    rules = FailOn(verdicts=set(VERDICT_RULES[fail_on]), outcomes=set())
+    report = build_report([run_record(r) for r in results], rules, accepted)
+    _write_reports(report, json_report, sarif, html)
+    _baseline_note(report)
+    if not report["summary"]["passed"]:
         raise typer.Exit(1)
 
 
@@ -363,8 +430,6 @@ attacks_app = typer.Typer(
 )
 app.add_typer(attacks_app, name="attacks")
 
-FAIL_ON_OUTCOMES = {SUCCEEDED: {SUCCEEDED}, STOPPED: {SUCCEEDED, STOPPED}, "never": set()}
-
 
 def _first_sentence(text: str) -> str:
     head, dot, _ = text.partition(". ")
@@ -443,11 +508,16 @@ def attacks_run(
             help="Exit 1 when any attack 'succeeded' (default), or also when one was 'stopped'. 'never' always exits 0.",
         ),
     ] = SUCCEEDED,
+    json_report: JsonOption = None,
+    sarif: SarifOption = None,
+    html: HtmlOption = None,
+    baseline: BaselineOption = None,
 ) -> None:
     """Run attacks from the library against an agent and score each one by what the agent did."""
-    if fail_on not in FAIL_ON_OUTCOMES:
+    if fail_on not in OUTCOME_RULES:
         err.print("[red]--fail-on must be succeeded, stopped or never[/red]")
         raise typer.Exit(2)
+    accepted = _baseline(baseline)
     scenarios = _select(ids or [], category or [])
     if not scenarios:
         err.print("[red]No attacks match.[/red]")
@@ -456,7 +526,11 @@ def attacks_run(
     _scoreboard(results, agent)
     if not no_traces:
         console.print(f"[dim]Traces: {escape(str(traces))}/<attack id>.jsonl[/dim]")
-    if any(r.evaluation.attack_outcome in FAIL_ON_OUTCOMES[fail_on] for r in results):
+    rules = FailOn(verdicts=set(), outcomes=set(OUTCOME_RULES[fail_on]))
+    report = build_report([run_record(r) for r in results], rules, accepted)
+    _write_reports(report, json_report, sarif, html)
+    _baseline_note(report)
+    if not report["summary"]["passed"]:
         raise typer.Exit(1)
 
 
@@ -506,6 +580,143 @@ def attacks_export(
     for name, text in files:
         (folder / name).write_text(text, encoding="utf-8")
     console.print(f"Wrote {len(files)} attack files to {escape(str(folder))}")
+
+
+def _trace_files(paths: list[Path]) -> list[Path]:
+    files: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            found = sorted(path.glob("*.jsonl"))
+            if not found:
+                err.print(f"[red]No .jsonl traces in[/red] {escape(str(path))}")
+                raise typer.Exit(2)
+            files += found
+        else:
+            files.append(path)
+    return files
+
+
+@app.command()
+def report(
+    traces: Annotated[
+        list[Path], typer.Argument(help="Trace files, or folders of them, written by run, attacks run or ci.")
+    ],
+    json_report: JsonOption = None,
+    sarif: SarifOption = None,
+    html: HtmlOption = None,
+) -> None:
+    """Build JSON, SARIF or HTML reports from saved traces, without running the agent again."""
+    if not (json_report or sarif or html):
+        err.print("[red]Give at least one of --json, --sarif or --html.[/red]")
+        raise typer.Exit(2)
+    records = []
+    for path in _trace_files(traces):
+        try:
+            records.append(run_record(read_trace(path)))
+        except TraceError as exc:
+            err.print(f"[red]Trace error:[/red] {escape(str(exc))}")
+            raise typer.Exit(2) from exc
+    built = build_report(records)
+    _write_reports(built, json_report, sarif, html)
+    s = built["summary"]
+    console.print(
+        f"{s['runs']} run(s): {s['verdicts'][COMPROMISED]} compromised, {s['verdicts'][ATTEMPTED]} attempted, "
+        f"{s['verdicts'][CLEAN]} clean."
+    )
+
+
+@app.command()
+def ci(
+    config: Annotated[Path, typer.Argument(help="CI config file.", show_default=True)] = DEFAULT_CONFIG,
+    agent: Annotated[str | None, typer.Option("--agent", "-a", help="Override the config's agent.")] = None,
+    output: Annotated[Path | None, typer.Option("--output", "-o", help="Override the config's report folder.")] = None,
+    baseline: BaselineOption = None,
+    write_baseline: Annotated[
+        Path | None,
+        typer.Option(
+            "--write-baseline", help="Write a baseline accepting every violation found in this run, and exit 0."
+        ),
+    ] = None,
+    reason: Annotated[
+        str, typer.Option("--reason", help="Reason stored with each entry written by --write-baseline.")
+    ] = "accepted when the baseline was created",
+) -> None:
+    """Run the agent against the config's scenarios and attacks, write every report, and fail on new violations.
+
+    Writes report.json, report.sarif, report.html and traces/ into the output folder.
+    Exit status: 0 no new violations, 1 new violations, 2 a config, scenario or agent error.
+    Under GitHub Actions it also prints error annotations and writes a job summary.
+    """
+    try:
+        cfg = load_config(config)
+    except ReportError as exc:
+        err.print(f"[red]Config error:[/red] {escape(str(exc))}")
+        raise typer.Exit(2) from exc
+    agent_spec = agent or cfg.agent
+    out = output or cfg.output
+    accepted = _baseline(baseline or cfg.baseline) if write_baseline is None else {}
+    scenarios = _load_all(cfg.scenarios)
+    if cfg.attacks is not None:
+        scenarios += _select(cfg.attacks, cfg.categories)
+    if not scenarios:
+        err.print("[red]The config selects no scenarios or attacks.[/red]")
+        raise typer.Exit(2)
+    console.print(
+        f"agentbreak ci: {len(scenarios)} run(s) against [bold]{escape(agent_spec)}[/bold] from {escape(str(config))}"
+    )
+    results = _run_all(scenarios, agent_spec, out / "traces", cfg.max_calls, details=False)
+    built = build_report([run_record(r) for r in results], cfg.fail_on, accepted)
+    _ci_table(built)
+    if write_baseline is not None:
+        write_json(baseline_document(built["violations"], reason), write_baseline)
+        console.print(
+            f"Wrote a baseline accepting {len(built['violations'])} violation(s) to {escape(str(write_baseline))}"
+        )
+        return
+    files = _write_reports(built, out / "report.json", out / "report.sarif", out / "report.html")
+    _baseline_note(built)
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        for line in github_annotations(built):
+            print(line)
+    summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_file:
+        with open(summary_file, "a", encoding="utf-8") as fh:
+            fh.write(markdown_summary(built, files))
+    s = built["summary"]
+    if s["passed"]:
+        console.print(f"[bold green]PASSED[/bold green]: no new violations ({s['accepted_violations']} accepted).")
+    else:
+        console.print(f"[bold red]FAILED[/bold red]: {s['new_violations']} new violation(s).")
+        raise typer.Exit(1)
+
+
+def _ci_table(built: dict) -> None:
+    table = Table(show_edge=False, header_style="bold")
+    table.add_column("run", no_wrap=True)
+    table.add_column("attack", no_wrap=True, min_width=9)
+    table.add_column("verdict", no_wrap=True, min_width=11)
+    table.add_column("task done", no_wrap=True)
+    table.add_column("CI", no_wrap=True)
+    status: dict[str, str] = {}
+    for v in built["violations"]:
+        if status.get(v["run"]) != "new":
+            status[v["run"]] = v["status"]
+    for r in built["runs"]:
+        style = VERDICT_STYLE[r["verdict"]]
+        mark = {"new": "[bold red]fail[/bold red]", "accepted": "[dim]accepted[/dim]"}.get(
+            status.get(r["id"], ""), "ok"
+        )
+        table.add_row(
+            escape(r["id"]),
+            _outcome_cell(r.get("attack_outcome")),
+            f"[{style}]{r['verdict']}[/{style}]",
+            _done(r.get("task_completed")),
+            mark,
+        )
+    console.print(table)
+    for v in built["violations"]:
+        colour = "red" if v["status"] == "new" else "dim"
+        console.print(f"[{colour}]{v['status']}[/{colour}] {escape(v['id'])}: {escape(v['message'])}")
 
 
 def main() -> None:

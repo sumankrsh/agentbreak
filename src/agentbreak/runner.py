@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import inspect
 import json
 import sys
 import time
@@ -71,6 +72,7 @@ class RunResult:
     state: dict[str, Any] = field(default_factory=dict)
     started: str = ""
     seconds: float = 0.0
+    agent_source: dict[str, Any] | None = None
 
     @property
     def verdict(self) -> str:
@@ -88,6 +90,8 @@ class RunResult:
             "agent": self.agent,
             "started": self.started,
         }
+        if self.agent_source:
+            header["agent_source"] = dict(self.agent_source)
         if self.scenario.attack:
             a = self.scenario.attack
             header["attack"] = {"id": a.id, "category": a.category, "vector": a.vector}
@@ -100,6 +104,18 @@ class RunResult:
             "seconds": round(self.seconds, 3),
         }
         return [header, *({"type": "call", **c.as_dict()} for c in self.calls), result]
+
+
+def agent_source(agent: Agent) -> dict[str, Any] | None:
+    """Where the agent function is defined, so reports can point at the code to fix."""
+    try:
+        path = inspect.getsourcefile(agent)
+        _, line = inspect.getsourcelines(agent)
+    except (TypeError, OSError):
+        return None
+    if not path:
+        return None
+    return {"path": str(Path(path).resolve()), "line": max(int(line), 1)}
 
 
 def run_scenario(scenario: Scenario, agent: Agent, agent_name: str = "agent", max_calls: int = 100) -> RunResult:
@@ -132,6 +148,7 @@ def run_scenario(scenario: Scenario, agent: Agent, agent_name: str = "agent", ma
         state=toolbox.state(),
         started=started,
         seconds=seconds,
+        agent_source=agent_source(agent),
     )
 
 

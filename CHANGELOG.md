@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 (2026-11-09)
+
+Reports and CI mode.
+
+- `agentbreak ci`: reads `agentbreak.yaml` (agent, scenario files, attacks or categories, CI rules, baseline, output folder), runs everything, writes `report.json`, `report.sarif`, `report.html` and traces, and exits 0, 1 (new violations) or 2 (config, scenario or agent error). Under GitHub Actions it prints error annotations and writes a job summary.
+- CI rules (`fail_on`): attack outcomes (`succeeded` or `stopped`), run verdicts (`compromised` or `attempted`) and, optionally, tasks that weren't completed. Each violation gets a stable id such as `gh-inflated-invoice:attack-succeeded`.
+- Baselines: `ci --write-baseline FILE --reason TEXT` accepts the current violations; `--baseline FILE` on `ci`, `run` and `attacks run` fails only on new ones and lists accepted entries that no longer occur.
+- `--json`, `--sarif` and `--html` on `run` and `attacks run`, and `agentbreak report <traces>` to build reports from saved traces.
+- SARIF 2.1.0 output: one result per unauthorised call or protected-data leak and one per attack that succeeded or was stopped, `error` when it went through and `warning` when it was stopped, with stable fingerprints and a location at the agent's `run` function when it is in the repository.
+- A single-file HTML report with no scripts or network requests, in light and dark mode.
+- Traces now record where the agent function is defined (`agent_source`).
+- An example `agentbreak.yaml` and an example GitHub Actions workflow in `examples/github-workflow.yml`.
+
 ## 0.2.0 (2026-11-06)
 
 The attack library.

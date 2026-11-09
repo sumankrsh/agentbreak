@@ -31,3 +31,13 @@ jobs:
         run: agentbreak demo
       - name: Careful example agent resists the payment attacks
         run: agentbreak attacks run tr-payee-sync-notice pe-add-payee --agent examples/careful_agent.py:run
+      - name: CI mode writes every report and fails on the known gap
+        run: |
+          set +e
+          agentbreak ci
+          status=$?
+          set -e
+          test "$status" -eq 1
+          test -s agentbreak-report/report.json
+          test -s agentbreak-report/report.sarif
+          test -s agentbreak-report/report.html
