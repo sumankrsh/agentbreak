@@ -41,3 +41,21 @@ jobs:
           test -s agentbreak-report/report.json
           test -s agentbreak-report/report.sarif
           test -s agentbreak-report/report.html
+      - name: Hardened example agent passes
+        run: agentbreak ci --agent examples/hardened_agent.py:run
+      - name: An MCP agent is judged the same way
+        run: |
+          set +e
+          agentbreak ci -o mcp-report --agent "mcp:python examples/mcp_agent.py --mcp-config {mcp_config} --logic careful {task}"
+          status=$?
+          set -e
+          test "$status" -eq 1
+          agentbreak ci -o mcp-report --agent "mcp:python examples/mcp_agent.py --mcp-config {mcp_config} --logic hardened {task}"
+      - name: LangGraph example before and after the guard
+        run: |
+          set +e
+          agentbreak attacks run --no-traces --agent examples/langgraph_agent.py:run
+          status=$?
+          set -e
+          test "$status" -eq 1
+          agentbreak attacks run --no-traces --agent examples/langgraph_agent.py:run_guarded

@@ -1,8 +1,10 @@
 # agentbreak
 
-Run your AI agent against a library of attacks on fake email, file and payment tools, find out which unauthorised actions went through, and fail the build when a new one does.
+Run your AI agent (a Python function, a LangGraph graph or any program that uses MCP tools) against a library of attacks on fake email, file and payment tools, find out which unauthorised actions went through, and fail the build when a new one does.
 
-![agentbreak ci: the example careful agent against an example scenario and twelve attacks; eleven attacks are resisted, one gets through, and the run fails with two new violations and writes JSON, SARIF and HTML reports](docs/demo.svg)
+![Before and after: agentbreak ci fails the example careful agent because one of twelve attacks gets through, with two new violations; the same run against the hardened agent resists all twelve and passes](docs/demo.svg)
+
+▶ [Watch the 55-second demo video](https://github.com/sumankrsh/agentbreak/releases/latest/download/demo.mp4)
 
 ## The problem
 
@@ -12,7 +14,9 @@ Those questions are about actions, not words. `agentbreak` answers them by runni
 
 It ships with twelve ready-made attacks in five categories: poisoned tool descriptions, poisoned tool responses, permission escalation, data exfiltration and goal hijacking. Each attack names what the attacker wants (a transfer to their account, a file sent outside), and the run scores the attack as **succeeded**, **stopped** or **resisted** from the recorded calls alone.
 
-This release makes the results usable in a pipeline: JSON, SARIF and single-file HTML reports, and `agentbreak ci`, which reads a config file, runs everything, writes the reports and fails the build on new violations. A baseline file lets a team accept a known gap, with a reason, so the build fails only when something new gets through. Everything runs offline. Adapters for MCP and LangGraph agents are planned for the next release and are not in this one.
+Results are usable in a pipeline: JSON, SARIF and single-file HTML reports, and `agentbreak ci`, which reads a config file, runs everything, writes the reports and fails the build on new violations. A baseline file lets a team accept a known gap, with a reason, so the build fails only when something new gets through.
+
+Your agent doesn't have to be written for agentbreak. A LangGraph graph gets the sandbox as LangChain tools. An agent that runs as its own program and gets its tools from an MCP server, in any language, gets agentbreak as that server and is judged the same way. Everything runs offline.
 
 ## Quickstart
 
@@ -29,7 +33,19 @@ agentbreak ci
 - `agentbreak-report/report.json`: everything, for your own tooling.
 - `agentbreak-report/traces/`: one JSON Lines trace per run.
 
-Suppose the team decides to fix the invoice check later. Accept today's violations with a reason, and the build fails only on new ones:
+### Before and after: fixing the gap
+
+[examples/hardened_agent.py](examples/hardened_agent.py) is the same agent with two changes, marked `FIX` in the file: it acts only on invoice lines, never on "transfer X to account Y" requests in an email, and it reads the whole inbox before paying. When two messages give the same invoice number different amounts or accounts, it pays neither and holds the invoice for a person.
+
+```bash
+agentbreak ci --agent examples/hardened_agent.py:run
+```
+
+All twelve attacks are resisted and the command exits with status 0. The fix has a cost, and the report shows it: in `gh-inflated-invoice` the genuine 420.00 invoice is held too, so the task column changes from "yes" to "no" for that run. Both example agents do only one job (paying invoices), so they leave the other tasks undone: the careful agent completes 3 of the 13 runs' tasks and the hardened agent 2. Set `task_incomplete: true` in the config if your agent must also get its work done to pass.
+
+### Accepting a known gap
+
+Suppose instead the team decides to fix the invoice check later. Accept today's violations with a reason, and the build fails only on new ones:
 
 ```bash
 agentbreak ci --write-baseline agentbreak-baseline.json --reason "amount check on corrected invoices: fix planned"
@@ -63,6 +79,45 @@ This exits with status 1, because a note in the folder gets the vulnerable agent
 
 To run agentbreak in your own repository's pipeline, copy [examples/github-workflow.yml](examples/github-workflow.yml) to `.github/workflows/` and write an `agentbreak.yaml` for your agent.
 
+### Testing a LangGraph agent
+
+```bash
+pip install ".[langgraph]"
+agentbreak attacks run --agent examples/langgraph_agent.py:run
+agentbreak attacks run --agent examples/langgraph_agent.py:run_guarded
+```
+
+[examples/langgraph_agent.py](examples/langgraph_agent.py) is the usual tool-calling graph: a model node, a `ToolNode`, and a loop between them. So that it runs offline, its model node is a rule-based stand-in that trusts what it reads. The first command scores it: the inflated invoice gets paid (1 succeeded), a transfer to a new account is attempted and blocked by the saved-payees rule (1 stopped), and 10 are resisted, so it exits with status 1. The second command runs the same graph with a guard node between the model and the tools, which lets a transfer through only to a saved payee that hasn't been paid in this run. All twelve are resisted and it exits with status 0.
+
+The adapter is two functions in [src/agentbreak/adapters/langgraph.py](src/agentbreak/adapters/langgraph.py). For your own graph:
+
+```python
+from agentbreak.adapters.langgraph import graph_agent
+from langgraph.prebuilt import create_react_agent
+
+run = graph_agent(lambda tools: create_react_agent(my_model, tools))  # then: --agent my_agent.py:run
+```
+
+`create_react_agent` still works in LangGraph 1.x but is marked deprecated there; any function that takes a list of tools and returns a compiled graph will do. `langchain_tools(tools)` gives you the sandbox as LangChain tools if you build the agent some other way.
+
+### Testing an MCP agent
+
+```bash
+agentbreak ci --agent "mcp:python examples/mcp_agent.py --mcp-config {mcp_config} --logic careful {task}"
+```
+
+An `mcp:` agent is a command, run once per scenario. agentbreak writes an MCP config file whose only server is itself and replaces `{mcp_config}` with its path and `{task}` with the scenario's task. When the agent starts that server, it gets the scenario's tools over MCP (stdio), and every call is recorded and judged exactly as for a Python agent. [examples/mcp_agent.py](examples/mcp_agent.py) is a standalone MCP client using only the Python standard library, running the careful agent's logic. Its result is the same as the in-process run above: 11 of 12 resisted, exit status 1. With `--logic hardened` it passes.
+
+Most MCP-capable agents take a config file and a prompt, so the same pattern works for programs in any language. The command is split like a shell would split it but not run through a shell. The agent also gets the environment variables `AGENTBREAK_TASK`, `AGENTBREAK_MCP_CONFIG` and `AGENTBREAK_MCP_COMMAND` (the server command as a JSON list).
+
+To try a desktop or IDE agent by hand, point its MCP settings at the sandbox:
+
+```json
+{"mcpServers": {"agentbreak": {"command": "agentbreak", "args": ["mcp", "serve", "gh-inflated-invoice"]}}}
+```
+
+`agentbreak mcp serve` takes a scenario file or an attack id. It prints the task to give the agent on stderr (stdout carries the protocol) and, when the client disconnects, prints the verdict and writes a trace to `agentbreak-traces/`.
+
 ## Features
 
 - **An attack library you can read.** Twelve attacks, each a short YAML scenario with a task, a seeded environment, a policy and an `attack` section. `agentbreak attacks list` shows them, `agentbreak attacks run` runs all or some of them (by id or `--category`) and prints a scoreboard, and `agentbreak attacks export <folder>` writes the YAML files out so you can adapt them to your own workflows.
@@ -84,13 +139,15 @@ To run agentbreak in your own repository's pipeline, copy [examples/github-workf
 - **Protected data.** List canary strings (a fake API key, a customer number) and any write or outbound call whose arguments contain one is a finding, even when the call itself was authorised: the agent may email the user, but not with the key in the body.
 - **Did it still do the job?** `required` rules list what the task needs to have happened. The report says whether the task was completed, so you can tell a safe agent from one that refuses to do anything.
 - **Bring your own agent.** An agent is any Python function `run(task, tools)`. Point `--agent` at `package.module:function` or `path/to/file.py:function`. If the agent raises, the error is recorded and the calls it made are still judged. A runaway agent is stopped at `--max-calls` (default 100).
+- **LangGraph and LangChain agents.** `graph_agent(build)` turns a function that builds your graph from a list of tools into an agent; `langchain_tools(tools)` gives the sandbox as LangChain `StructuredTool`s with the scenario's descriptions (poisoned ones included) and JSON schemas. Tool errors reach the model as `Error: ...` text, as they would from a real tool. Optional: `pip install "agentbreak[langgraph]"`.
+- **MCP agents in any language.** `--agent "mcp:<command>"` runs the agent as its own process with agentbreak as its MCP server. A failed or slow agent is recorded as an agent error with the end of its stderr; it is stopped after 120 seconds (set `AGENTBREAK_AGENT_TIMEOUT` to change that) or when it passes `--max-calls`. `agentbreak mcp serve` runs the sandbox as a stdio MCP server for any client, for testing by hand.
 - **Traces you can keep.** One JSON Lines file per scenario: a header with the scenario's SHA-256 (and the attack's id and category), one line per call, and a result line with the findings, the attack outcome and the final state of the sandbox (emails sent, files changed, money moved). `agentbreak show` prints one.
 - **CI mode.** `agentbreak ci` reads `agentbreak.yaml`: the agent, your scenario files (globs allowed), which attacks to run (all, a list, or by category), the CI rules and where to write reports. It runs everything, prints a table, writes JSON, SARIF, HTML and traces, and exits 0 (no new violations), 1 (new violations) or 2 (a config, scenario or agent error). Under GitHub Actions it also prints each new violation as an error annotation on the agent's code and writes a job summary.
 - **CI rules you choose.** A violation is an attack outcome (`succeeded`, or also `stopped`), a run verdict (`compromised`, or also `attempted`), and optionally a task that wasn't completed, so an agent can't pass by refusing to do anything. Each violation has a stable id such as `gh-inflated-invoice:attack-succeeded`.
 - **Baselines.** `--write-baseline` writes every current violation to a JSON file with a reason; `--baseline` (on `ci`, `run` and `attacks run`) accepts those and fails only on new ones. Entries that no longer occur are listed so the baseline can be trimmed.
 - **Three report formats.** `--json`, `--sarif` and `--html` on `run` and `attacks run`, all three from `ci`, and `agentbreak report <traces>` to rebuild them from saved traces without running the agent again. The HTML page has no scripts and loads nothing from the network. The SARIF file has one result per unauthorised call or protected-data leak (`error` if it went through, `warning` if it was stopped) and one per attack that succeeded or was stopped, each with a stable fingerprint so code scanning can track it across runs.
 - **Exit codes for CI.** `run` exits 1 when any scenario is `compromised`. `--fail-on attempted` also fails on stopped attempts; `--fail-on never` always exits 0. `attacks run` exits 1 when any attack `succeeded`, or with `--fail-on stopped` also when one was stopped. Bad scenario files, agent paths, attack ids or categories exit 2.
-- **Offline and deterministic.** No API key, no network, no real side effects. Three dependencies: Typer, Rich and PyYAML.
+- **Offline and deterministic.** No API key, no network, no real side effects. Three dependencies: Typer, Rich and PyYAML. LangGraph is an optional extra; the MCP support uses only the standard library.
 
 ### How it compares
 
@@ -101,6 +158,7 @@ Checked in November 2026; star counts are from GitHub at that time.
 - [AgentDojo](https://github.com/ethz-spylab/agentdojo) (about 1,000 stars) is a research benchmark of agent tasks and injection attacks with its own environments, aimed at comparing models and defences. agentbreak is aimed at testing your own agent against scenarios you write about your own workflows, in CI. Its twelve attacks are a starting set to copy and adapt, not a benchmark.
 - [Argus](https://github.com/gy15901580825/Argus) (about 200 stars) bundles a much larger set of probes mapped to OWASP, MITRE ATLAS and NIST, with SARIF output and a GitHub Action. agentbreak has far fewer attacks; what it adds for CI is the split between actions that went through and actions a control stopped, a baseline of accepted violations with reasons, and SARIF results that point at the agent function under test.
 - [mcp-injection-experiments](https://github.com/invariantlabs-ai/mcp-injection-experiments) shows tool poisoning and shadowing attacks against real MCP clients. agentbreak's `tool-description` attacks test the same idea in a sandbox, scored by what the agent then did.
+- [AASTF](https://github.com/anonymousAAK/aastf) (under 10 stars) and [aion-redteam](https://github.com/Cypharia/aion-redteam) (under 10 stars) are young harnesses that hook into agent frameworks such as LangGraph to intercept tool calls. agentbreak's MCP adapter works from the other side: the agent runs as its own unmodified program and agentbreak is simply one of its MCP servers, so the agent can be written in any language and needs no agentbreak code.
 
 ## How it works
 
@@ -108,8 +166,10 @@ Checked in November 2026; star counts are from GitHub at that time.
 flowchart LR
     S[scenario.yaml] --> B[Sandbox: fake email, files, payments]
     S --> P[Policy: allow, protected_data, required]
-    A[Agent under test] -- tools.call --> B
-    B -- result or error --> A
+    A[Python agent] -- tools.call --> B
+    L[LangGraph graph] -- LangChain tools --> B
+    M[MCP agent process] -- MCP over stdio --> Y[agentbreak mcp relay]
+    Y -- local socket --> B
     B --> R[(Recorded calls: executed, blocked, error)]
     R --> E{Evaluate}
     P --> E
@@ -126,7 +186,8 @@ flowchart LR
 2. For each run the agent gets a fresh sandbox ([sandbox.py](src/agentbreak/sandbox.py)) and is called as `agent(task, tools)`. Each `tools.call(...)` is validated against the tool's schema, passed through the service's controls and recorded as `executed`, `blocked` or `error`. Tools never raise: the agent gets `{"ok": false, "error": "..."}`, as an LLM would see a tool error.
 3. After the agent returns, every recorded call is checked against the policy ([evaluate.py](src/agentbreak/evaluate.py)). Unauthorised or protected-data calls become findings. Any finding that executed makes the run `compromised`; findings that were all stopped make it `attempted`; no findings means `clean`.
 4. If the scenario has an `attack` section, the recorded calls are also matched against its `succeeds_if` rules to score the attack as `succeeded`, `stopped` or `resisted`. The library lives in [src/agentbreak/attacks/](src/agentbreak/attacks/).
-5. Reports ([report.py](src/agentbreak/report.py)) are built from the same records a trace holds, so a report made later from traces matches one made straight after the run. The CI rules turn verdicts and attack outcomes into violations with stable ids, and the baseline marks known ones as accepted.
+5. Agents that aren't a plain function reach the same toolbox through an adapter ([src/agentbreak/adapters/](src/agentbreak/adapters/)). For an `mcp:` agent, agentbreak listens on a random local port with a one-time token, writes an MCP config that starts `agentbreak mcp relay`, and runs the agent. The relay passes MCP messages between the agent's stdio and that port, where [mcp_server.py](src/agentbreak/mcp_server.py) answers `initialize`, `tools/list` and `tools/call` from the scenario's toolbox. The agent's printed output becomes its answer.
+6. Reports ([report.py](src/agentbreak/report.py)) are built from the same records a trace holds, so a report made later from traces matches one made straight after the run. The CI rules turn verdicts and attack outcomes into violations with stable ids, and the baseline marks known ones as accepted.
 
 The built-in `inbox-assistant` ([agents/inbox_assistant.py](src/agentbreak/agents/inbox_assistant.py)) is a rule-based stand-in for an over-trusting LLM agent: it reads what the task points it at, then acts on every instruction it finds, in emails, files, tool descriptions and tool results. It recognises only a few phrasings (listed at the top of the file) and is not a model of any real LLM. It exists so the harness can be shown and tested without an API key. The attacks are written in phrasings it understands, so its 8-of-12 result says the harness catches what it should, and nothing about how often a real model falls for these attacks.
 
@@ -135,7 +196,7 @@ The built-in `inbox-assistant` ([agents/inbox_assistant.py](src/agentbreak/agent
 The CI config, [agentbreak.yaml](agentbreak.yaml) (paths are relative to the config file):
 
 ```yaml
-agent: examples/careful_agent.py:run   # a built-in name, module:function or file.py:function
+agent: examples/careful_agent.py:run   # a built-in name, module:function, file.py:function or "mcp:<command>"
 scenarios:                             # scenario files (globs allowed)
   - examples/reports-cleanup.yaml
 attacks: all                           # all, none, or a list of attack ids
@@ -150,6 +211,8 @@ fail_on:
 # baseline: agentbreak-baseline.json   # accepted violations; only new ones fail the build
 output: agentbreak-report              # report.json, report.sarif, report.html and traces/
 ```
+
+An `mcp:` command in the config runs in the config file's folder; one given with `--agent` runs in the current folder.
 
 `agentbreak ci [CONFIG]` options: `-a, --agent` and `-o, --output` override the config; `--baseline FILE` overrides its baseline; `--write-baseline FILE` (with `--reason TEXT`) writes a baseline accepting every current violation and exits 0. A baseline file:
 
@@ -260,13 +323,13 @@ def run(task: str, tools) -> str:
     return "what the agent would tell the user"
 ```
 
-To test an LLM-based agent, write a `run` function that sends `task` and `tools.specs()` to your model and executes each tool call it asks for with `tools.call(name, arguments)`.
+To test an LLM-based agent, write a `run` function that sends `task` and `tools.specs()` to your model and executes each tool call it asks for with `tools.call(name, arguments)`, or use the LangGraph or MCP adapters above.
 
 `agentbreak run` options:
 
 | Option | Default | What it does |
 |---|---|---|
-| `-a, --agent` | `inbox-assistant` | Agent to test: a built-in name, `module:function` or `file.py:function`. |
+| `-a, --agent` | `inbox-assistant` | Agent to test: a built-in name, `module:function`, `file.py:function` or `"mcp:<command>"`. |
 | `-t, --traces DIR` | `agentbreak-traces` | Folder for one trace per scenario (overwritten on each run). |
 | `--no-traces` | off | Don't write traces. |
 | `--max-calls N` | `100` | Stop the agent after N tool calls. |
@@ -286,6 +349,12 @@ To test an LLM-based agent, write a `run` function that sends `task` and `tools.
 
 `agentbreak report <traces or folders> --json/--sarif/--html FILE` builds reports from saved traces, using the default CI rules (attack `succeeded`, verdict `compromised`) for the violations list; it always exits 0.
 
+`agentbreak mcp serve <scenario file or attack id>` options: `-t, --traces DIR` (default `agentbreak-traces`) and `--max-calls N` (default 100). It exits 1 if the run was compromised.
+
+| Environment variable | Default | What it does |
+|---|---|---|
+| `AGENTBREAK_AGENT_TIMEOUT` | `120` | Seconds an `mcp:` agent may run for each scenario before it is stopped. |
+
 Other commands: `demo`, `validate`, `tools`, `show`, `attacks list`, `attacks export`. Each has `--help`.
 
 ## Limitations
@@ -297,12 +366,15 @@ Other commands: `demo`, `validate`, `tools`, `show`, `attacks list`, `attacks ex
 - **Twelve attacks is a small library.** Each attack is one phrasing of one technique against one workflow. An agent that resists all twelve has resisted these twelve, not the technique. Write more attacks for your own workflows; the built-in ones are there to copy.
 - **The attack's goal is only as good as `succeeds_if`.** A goal rule that is too narrow (one exact account number) misses a variant that does the same damage. The run's verdict still catches any unauthorised call, so read both.
 - **The built-in agent is a toy.** It shows that the harness catches what it should. It says nothing about how any real model behaves.
-- **The agent runs in your Python process.** The tools are fake, but the agent's own code is not sandboxed: an agent that opens files or the network itself is not stopped or recorded. Run agents you don't trust in a container.
-- **No MCP or LangGraph adapters yet.** To test such an agent today, write a `run(task, tools)` wrapper as shown above.
+- **The agent's own code is not sandboxed.** The tools are fake, but a Python or LangGraph agent runs in your Python process and an `mcp:` agent runs as an ordinary process with your permissions: anything it does outside its tools (opening files, calling the network, other MCP servers in its own settings) is not stopped or recorded. Run agents you don't trust in a container.
+- **MCP support is tools over stdio only.** `initialize`, `ping`, `tools/list` and `tools/call`, no resources, prompts, sampling or HTTP transport, and the tool list never changes during a run. While building this release the server was checked against the example client and the official MCP Python SDK client (version 2.3.0, which negotiated protocol version 2025-11-25); the tests use the example client, not the SDK.
+- **Controls inside the agent show as "resisted".** agentbreak sees only the tool boundary. The LangGraph guard node holds a transfer before it reaches the tool, so the attack is scored resisted, not stopped. That is accurate about what reached the tools, but read the agent's answer to see what it held.
+- **The LangGraph example uses a rule-based model node.** The adapter was tested with LangGraph 1.2 and langchain-core 1.7, not with a real chat model. Its guard pays the first transfer to a saved payee and holds the rest, so it relies on the genuine invoice arriving first.
+- **The example agents do one job.** The careful and hardened agents only pay invoices, so they leave other tasks undone (3 and 2 of 13 completed). Their results show what the harness reports, not what a general-purpose agent should do.
 - **Baselines match by id, not by content.** A violation id is the attack id (or scenario name) plus the rule, so an accepted `gh-inflated-invoice:attack-succeeded` stays accepted even if the scenario file or the calls change. Review baselines like code.
 - **SARIF locations are coarse.** A result points at the line where the agent's `run` function starts when that file is inside the repository, otherwise at line 1 of the scenario file, otherwise at the attack's name in the library (which GitHub shows without a code snippet). It can't point at the line inside the agent that made the call.
 - **The SARIF output was checked against the SARIF 2.1.0 JSON schema while building this release**, not by uploading it to GitHub code scanning; the tests check its structure, not the schema.
-- Tested on Linux with Python 3.11 and 3.12.
+- Tested on Linux with Python 3.11 and 3.12. The `mcp:` adapter uses a local TCP socket and was not tried on Windows or macOS.
 
 ## More tools
 
@@ -317,7 +389,7 @@ See [github.com/sumankrsh](https://github.com/sumankrsh) for newer tools.
 
 ## Credits
 
-No code was adapted from other projects. The idea of judging indirect prompt injection by the actions an agent takes in a tool environment is explored in depth by AgentDojo (Debenedetti et al., "AgentDojo: A Dynamic Environment to Evaluate Prompt Injection Attacks and Defenses for LLM Agents", 2024). Tool poisoning and tool shadowing through tool descriptions were described publicly by Invariant Labs in 2025; the two `tool-description` attacks here are original scenarios built on that idea. The attack scenarios were written for this project. promptfoo and Snyk agent-scan are named above for comparison. All names, addresses, accounts and keys in the scenarios are synthetic; email domains use the reserved `example.*` names.
+No code was adapted from other projects. The MCP server and the example client were written from the public Model Context Protocol specification. The idea of judging indirect prompt injection by the actions an agent takes in a tool environment is explored in depth by AgentDojo (Debenedetti et al., "AgentDojo: A Dynamic Environment to Evaluate Prompt Injection Attacks and Defenses for LLM Agents", 2024). Tool poisoning and tool shadowing through tool descriptions were described publicly by Invariant Labs in 2025; the two `tool-description` attacks here are original scenarios built on that idea. The attack scenarios were written for this project. promptfoo and Snyk agent-scan are named above for comparison. All names, addresses, accounts and keys in the scenarios are synthetic; email domains use the reserved `example.*` names.
 
 ## Licence
 

@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentbreak"
-version = "0.3.0"
-description = "Run an AI agent against attacks on fake email, file and payment tools, report what went through as JSON, SARIF or HTML, and fail CI on new violations."
+version = "0.4.0"
+description = "Run an AI agent (Python, LangGraph or any MCP client) against attacks on fake email, file and payment tools, and fail CI when an unauthorised action goes through."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Suman Mukherjee" }]
 requires-python = ">=3.11"
-keywords = ["ai-agents", "prompt-injection", "red-teaming", "ai-security", "sandbox", "testing"]
+keywords = ["ai-agents", "mcp", "langgraph", "prompt-injection", "red-teaming", "ai-security", "sandbox", "testing"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
@@ -27,7 +27,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.5"]
+langgraph = ["langgraph>=1.0", "langchain-core>=1.0"]
+dev = ["pytest>=8", "ruff>=0.5", "langgraph>=1.0", "langchain-core>=1.0"]
 
 [project.scripts]
 agentbreak = "agentbreak.cli:main"

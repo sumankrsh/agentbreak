@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .adapters.mcp import PREFIX as MCP_PREFIX
+from .adapters.mcp import MCPCommandAgent
 from .evaluate import Evaluation, Finding, evaluate
 from .sandbox import Call, CallLimitReached, Toolbox
 from .scenario import Scenario
@@ -28,12 +30,22 @@ class AgentLoadError(ValueError):
     """The --agent value doesn't point at a callable."""
 
 
-def load_agent(spec: str) -> Agent:
-    """Load an agent from a built-in name, `package.module:function` or `path/to/file.py:function`."""
+def load_agent(spec: str, cwd: Path | None = None) -> Agent:
+    """Load an agent from a built-in name, `package.module:function`, `path/to/file.py:function`
+    or `mcp:<command>` (an external program that uses agentbreak as its MCP server).
+
+    `cwd` is the folder an `mcp:` command runs in (default: the current one).
+    """
     spec = BUILTIN_AGENTS.get(spec, spec)
+    if spec.startswith(MCP_PREFIX):
+        try:
+            return MCPCommandAgent(spec[len(MCP_PREFIX) :], cwd=cwd)
+        except ValueError as exc:
+            raise AgentLoadError(str(exc)) from exc
     if ":" not in spec:
         raise AgentLoadError(
-            f"{spec!r}: use a built-in name ({', '.join(BUILTIN_AGENTS)}), module:function or file.py:function"
+            f"{spec!r}: use a built-in name ({', '.join(BUILTIN_AGENTS)}), module:function, file.py:function"
+            " or mcp:<command>"
         )
     target, _, attr = spec.rpartition(":")
     if target.endswith(".py"):
@@ -109,6 +121,7 @@ class RunResult:
 def agent_source(agent: Agent) -> dict[str, Any] | None:
     """Where the agent function is defined, so reports can point at the code to fix."""
     try:
+        agent = inspect.unwrap(agent)
         path = inspect.getsourcefile(agent)
         _, line = inspect.getsourcelines(agent)
     except (TypeError, OSError):

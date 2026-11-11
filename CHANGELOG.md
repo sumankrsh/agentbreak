@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0 (2026-11-11)
+
+Adapters for MCP and LangGraph agents, and a before/after example.
+
+- `--agent "mcp:<command>"`: test an agent that runs as its own program and gets its tools from an MCP server, in any language. agentbreak writes an MCP config whose only server is itself (`{mcp_config}` and `{task}` are filled into the command), serves the scenario's tools over MCP stdio through `agentbreak mcp relay`, and judges the calls exactly as for a Python agent. Agent failures, timeouts (`AGENTBREAK_AGENT_TIMEOUT`, default 120 seconds) and `--max-calls` are recorded as agent errors. In `agentbreak.yaml`, an `mcp:` command runs in the config file's folder.
+- `agentbreak mcp serve <scenario or attack id>`: the sandbox as a stdio MCP server for any client, for testing by hand; prints the verdict and writes a trace when the client disconnects.
+- `agentbreak.adapters.langgraph`: `langchain_tools(tools)` and `graph_agent(build)` for LangGraph and LangChain agents. Optional extra: `pip install "agentbreak[langgraph]"`.
+- `examples/hardened_agent.py`: the careful agent with the fix for `gh-inflated-invoice`; it resists all twelve attacks.
+- `examples/mcp_agent.py`: a standard-library MCP client agent; `examples/langgraph_agent.py`: a LangGraph agent with and without a guard node.
+- Reports point at the function a wrapped agent was built from (`graph_agent` points at your graph builder).
+- `python -m agentbreak` runs the CLI.
+
 ## 0.3.0 (2026-11-09)
 
 Reports and CI mode.

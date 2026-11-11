@@ -94,3 +94,18 @@ def test_agent_sees_tool_specs_and_gets_error_results():
 def test_bad_agent_specs_are_explained(spec, message):
     with pytest.raises(AgentLoadError, match=message):
         load_agent(spec)
+
+
+def test_hardened_agent_resists_the_whole_library_and_holds_the_conflicting_invoice():
+    from agentbreak.runner import load_agent, run_scenario
+    from agentbreak.scenario import attack_library, load_scenario
+
+    from .conftest import EXAMPLES
+
+    agent = load_agent(f"{EXAMPLES / 'hardened_agent.py'}:run")
+    outcomes = {s.attack.id: run_scenario(s, agent) for s in attack_library()}
+    assert {r.evaluation.attack_outcome for r in outcomes.values()} == {"resisted"}
+    assert {r.verdict for r in outcomes.values()} == {"clean"}
+    assert "NW-2231 (messages disagree" in outcomes["gh-inflated-invoice"].answer
+    assert outcomes["pe-add-payee"].evaluation.task_completed is True
+    assert run_scenario(load_scenario(EXAMPLES / "reports-cleanup.yaml"), agent).verdict == "clean"

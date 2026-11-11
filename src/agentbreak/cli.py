@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -13,8 +14,10 @@ from rich.markup import escape
 from rich.table import Table
 
 from . import __version__
+from .adapters.mcp import relay
 from .ci import DEFAULT_CONFIG, github_annotations, load_config, markdown_summary
 from .evaluate import ATTEMPTED, CLEAN, COMPROMISED, RESISTED, STOPPED, SUCCEEDED
+from .mcp_server import MCPServer, serve_stdio
 from .report import (
     OUTCOME_RULES,
     VERDICT_RULES,
@@ -38,7 +41,7 @@ from .runner import (
     run_scenario,
     write_trace,
 )
-from .sandbox import SERVICES, Call, Toolbox
+from .sandbox import SERVICES, Call, CallLimitReached, Toolbox
 from .scenario import (
     CATEGORIES,
     Scenario,
@@ -66,6 +69,10 @@ OUTCOME_TEXT = {
     RESISTED: "the agent made no call towards the attacker's goal",
 }
 DEFAULT_TRACES = Path("agentbreak-traces")
+AGENT_HELP = (
+    f"Agent to test: {', '.join(BUILTIN_AGENTS)}, module:function, path/to/agent.py:function"
+    " or 'mcp:<command>' (a program that uses agentbreak as its MCP server)."
+)
 
 
 def _version(value: bool) -> None:
@@ -273,9 +280,10 @@ def _run_all(
     max_calls: int,
     details: bool = True,
     summary: bool = True,
+    agent_cwd: Path | None = None,
 ) -> list[RunResult]:
     try:
-        agent = load_agent(agent_spec)
+        agent = load_agent(agent_spec, cwd=agent_cwd)
     except AgentLoadError as exc:
         err.print(f"[red]Agent error:[/red] {escape(str(exc))}")
         raise typer.Exit(2) from exc
@@ -299,7 +307,7 @@ def run(
         typer.Option(
             "--agent",
             "-a",
-            help=f"Agent to test: {', '.join(BUILTIN_AGENTS)}, module:function or path/to/agent.py:function.",
+            help=AGENT_HELP,
         ),
     ] = "inbox-assistant",
     traces: Annotated[
@@ -490,7 +498,7 @@ def attacks_run(
         typer.Option(
             "--agent",
             "-a",
-            help=f"Agent to test: {', '.join(BUILTIN_AGENTS)}, module:function or path/to/agent.py:function.",
+            help=AGENT_HELP,
         ),
     ] = "inbox-assistant",
     traces: Annotated[
@@ -664,7 +672,9 @@ def ci(
     console.print(
         f"agentbreak ci: {len(scenarios)} run(s) against [bold]{escape(agent_spec)}[/bold] from {escape(str(config))}"
     )
-    results = _run_all(scenarios, agent_spec, out / "traces", cfg.max_calls, details=False)
+    # An mcp: command from the config runs in the config's folder, like its other relative paths.
+    agent_cwd = None if agent else cfg.source.parent.resolve()
+    results = _run_all(scenarios, agent_spec, out / "traces", cfg.max_calls, details=False, agent_cwd=agent_cwd)
     built = build_report([run_record(r) for r in results], cfg.fail_on, accepted)
     _ci_table(built)
     if write_baseline is not None:
@@ -717,6 +727,66 @@ def _ci_table(built: dict) -> None:
     for v in built["violations"]:
         colour = "red" if v["status"] == "new" else "dim"
         console.print(f"[{colour}]{v['status']}[/{colour}] {escape(v['id'])}: {escape(v['message'])}")
+
+
+mcp_app = typer.Typer(
+    help="Serve a scenario's sandbox tools over MCP, for agents that get their tools from MCP servers.",
+    no_args_is_help=True,
+)
+app.add_typer(mcp_app, name="mcp")
+
+
+def _scenario_or_attack(target: str) -> Scenario:
+    if Path(target).is_file():
+        return _load_all([Path(target)])[0]
+    for scenario in attack_library():
+        if scenario.attack and scenario.attack.id == target:
+            return scenario
+    err.print(f"[red]No scenario file or attack id named[/red] {escape(target)}. Run `agentbreak attacks list`.")
+    raise typer.Exit(2)
+
+
+@mcp_app.command("serve")
+def mcp_serve(
+    target: Annotated[str, typer.Argument(help="A scenario file, or the id of a built-in attack.", show_default=False)],
+    traces: Annotated[Path, typer.Option("--traces", "-t", help="Folder for the trace file.")] = DEFAULT_TRACES,
+    max_calls: Annotated[
+        int, typer.Option("--max-calls", min=1, help="End the session after this many tool calls.")
+    ] = 100,
+) -> None:
+    """Run an MCP server (stdio) with the scenario's tools. When the client disconnects, judge every call it made.
+
+    Point any MCP client at this command, give its agent the scenario's task, and
+    let it work. The protocol uses stdout, so the task, the verdict and the trace
+    path are printed to stderr. Exits 1 if the run was compromised.
+    """
+    global console
+    scenario = _scenario_or_attack(target)
+    err.print(f"[bold]agentbreak MCP server[/bold] for {escape(scenario.name)}. Give the agent this task:")
+    err.print(f"  {escape(scenario.task)}")
+
+    def session(task: str, tools: Toolbox) -> None:
+        server = MCPServer(tools)
+        serve_stdio(server, sys.stdin, sys.stdout)
+        if server.limit_reached:
+            raise CallLimitReached(f"the agent made more than {max_calls} tool calls")
+
+    result = run_scenario(scenario, session, agent_name="mcp client", max_calls=max_calls)
+    result.agent_source = None
+    trace = write_trace(result, traces)
+    shown, console = console, err
+    try:
+        _print_run(result, trace)
+    finally:
+        console = shown
+    if result.verdict == COMPROMISED:
+        raise typer.Exit(1)
+
+
+@mcp_app.command("relay", hidden=True)
+def mcp_relay(address: str, token: str) -> None:
+    """Pass MCP messages between stdio and an agentbreak run (started for you by mcp: agents)."""
+    raise typer.Exit(relay(address, token, sys.stdin, sys.stdout))
 
 
 def main() -> None:
